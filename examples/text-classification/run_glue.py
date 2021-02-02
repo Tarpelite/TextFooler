@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
-from datasets import load_dataset, load_metric
+from datasets import load_dataset, load_metric,load_from_disk
 
 import transformers
 from transformers import (
@@ -52,6 +52,7 @@ task_to_keys = {
     "sst2": ("sentence", None),
     "stsb": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
+    "fake": ("sentence1", None)
 }
 
 logger = logging.getLogger(__name__)
@@ -211,7 +212,7 @@ def main():
     #
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
-    if data_args.task_name is not None:
+    if data_args.task_name is None:
         # Downloading and loading a dataset from the hub.
         datasets = load_dataset("glue", data_args.task_name)
     else:
@@ -248,10 +249,13 @@ def main():
     if data_args.task_name is not None:
         is_regression = data_args.task_name == "stsb"
         if not is_regression:
-            label_list = datasets["train"].features["label"].names
+            label_list = datasets["train"].unique("label")
+            label_list.sort()  # Let's sort it for determinism
             num_labels = len(label_list)
+            print("num labels: {}".format(num_labels))
         else:
             num_labels = 1
+
     else:
         # Trying to have good defaults here, don't hesitate to tweak to your needs.
         is_regression = datasets["train"].features["label"].dtype in ["float32", "float64"]
@@ -332,7 +336,8 @@ def main():
             )
     elif data_args.task_name is None and not is_regression:
         label_to_id = {v: i for i, v in enumerate(label_list)}
-
+    is_regression = False
+    label_to_id = {v: i for i, v in enumerate(label_list)}
     def preprocess_function(examples):
         # Tokenize the texts
         args = (
@@ -349,16 +354,16 @@ def main():
 
     train_dataset = datasets["train"]
     eval_dataset = datasets["validation_matched" if data_args.task_name == "mnli" else "validation"]
-    if data_args.task_name is not None or data_args.test_file is not None:
-        test_dataset = datasets["test_matched" if data_args.task_name == "mnli" else "test"]
+    # if data_args.task_name is not None or data_args.test_file is not None:
+    #     test_dataset = datasets["test_matched" if data_args.task_name == "mnli" else "test"]
 
     # Log a few random samples from the training set:
     for index in random.sample(range(len(train_dataset)), 3):
         logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
 
     # Get the metric function
-    if data_args.task_name is not None:
-        metric = load_metric("glue", data_args.task_name)
+    # if data_args.task_name is not None:
+    #     metric = load_metric("glue", data_args.task_name)
     # TODO: When datasets metrics include regular accuracy, make an else here and remove special branch from
     # compute_metrics
 
@@ -368,10 +373,7 @@ def main():
         preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
         preds = np.squeeze(preds) if is_regression else np.argmax(preds, axis=1)
         if data_args.task_name is not None:
-            result = metric.compute(predictions=preds, references=p.label_ids)
-            if len(result) > 1:
-                result["combined_score"] = np.mean(list(result.values())).item()
-            return result
+            return {"accuracy": (preds == p.label_ids).astype(np.float32).mean().item()}
         elif is_regression:
             return {"mse": ((preds - p.label_ids) ** 2).mean().item()}
         else:
